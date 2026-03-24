@@ -1,6 +1,5 @@
-discord.py
+discord.py[voice]
 aiohttp
 yarl
-PyNaCl
 python-dotenv
 yt-dlp
