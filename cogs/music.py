@@ -43,10 +43,10 @@ class Music(commands.Cog):
             "extract_flat": False,
             "source_address": "0.0.0.0",
             # Enable node.js since yt-dlp disabled everything but Deno by default
-            "js_runtimes": {"nodejs": {}},
+            "js_runtimes": {"node": {}},
             # Bypass "Sign in to confirm you're not a bot" for YouTube via client spoofing
             "extractor_args": {
-                "youtube": ["player_client=android,ios,tv,web"]
+                "youtube": ["player_client=ios,tv,android"]
             },
         }
 
