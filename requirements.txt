@@ -3,3 +3,4 @@ aiohttp
 yarl
 python-dotenv
 yt-dlp
+colorlog

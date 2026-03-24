@@ -1,36 +1,17 @@
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-from discord.ui import View, Button, Select
 import asyncio
 import logging
 import yt_dlp
-from collections import deque
 import random
 import time
 
+from models.player import MusicPlayer, FFMPEG_OPTIONS
+from utils.helpers import format_duration, format_number, get_progress_bar
+from views.controls import EnhancedControlButtons
+
 logger = logging.getLogger("music")
-
-FFMPEG_OPTIONS = {
-    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-    "options": "-vn",
-}
-
-
-class MusicPlayer:
-    def __init__(self):
-        self.queue = deque()
-        self.history = deque()
-        self.current = None
-        self.voice_client = None
-        self.channel = None
-        self.message = None
-        self.requester = None
-        self.volume = 1.0
-        self.paused = False
-        self.loop = False
-        self.shuffle = False
-        self.start_time = None
 
 
 class Music(commands.Cog):
@@ -39,6 +20,19 @@ class Music(commands.Cog):
         self.music_channels = {}
         self.players = {}
         self.auto_cleanup.start()
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        logger.info("🔍 Restoring existing music rooms...")
+        count = 0
+        for guild in self.bot.guilds:
+            category = discord.utils.get(guild.categories, name="🎵 MUSIC ROOMS")
+            if category:
+                for channel in category.text_channels:
+                    if channel.name.startswith("🎵┃") and channel.name.endswith("-music"):
+                        self.music_channels[channel.id] = channel
+                        count += 1
+        logger.info(f"✅ Restored {count} existing music rooms.")
 
     def get_audio_source(self, query: str):
         ydl_opts = {
@@ -62,31 +56,6 @@ class Music(commands.Cog):
             view_count = info.get("view_count", 0)
             source = discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS)
             return source, title, duration, thumbnail, uploader, view_count
-
-    def format_duration(self, seconds):
-        if seconds is None:
-            return "Live"
-        mins, secs = divmod(int(seconds), 60)
-        hours, mins = divmod(mins, 60)
-        if hours > 0:
-            return f"{hours:02d}:{mins:02d}:{secs:02d}"
-        return f"{mins:02d}:{secs:02d}"
-
-    def format_number(self, num):
-        if num >= 1000000:
-            return f"{num/1000000:.1f}M"
-        elif num >= 1000:
-            return f"{num/1000:.1f}K"
-        return str(num)
-
-    def get_progress_bar(self, current_time, total_time, length=20):
-        if total_time == 0:
-            return "━" * length
-
-        progress = min(current_time / total_time, 1.0)
-        filled = int(progress * length)
-        bar = "━" * filled + "◉" + "━" * (length - filled - 1)
-        return bar[:length]
 
     async def play_next(self, guild_id):
         player = self.players[guild_id]
@@ -117,6 +86,8 @@ class Music(commands.Cog):
             )
             player.start_time = time.time()
 
+            logger.info(f"▶️ Playing: {title} in {discord.utils.get(self.bot.guilds, id=guild_id).name}")
+
             player.voice_client.play(
                 source,
                 after=lambda e: asyncio.run_coroutine_threadsafe(
@@ -139,73 +110,81 @@ class Music(commands.Cog):
             player.current
         )
 
-        # สร้าง embed หลักที่สวยงาม
-        embed = discord.Embed(title="", description="", color=0x1DB954)
+        embed = discord.Embed(color=0x7C3AED)
 
-        # ตั้งค่า thumbnail และ author
-        embed.set_thumbnail(url=thumbnail)
         embed.set_author(
-            name="🎵 Damkoeng Music Player",
+            name="♫ ─── กำลังเล่นเพลง ─── ♫",
             icon_url="https://cdn.discordapp.com/emojis/741605543046807626.gif",
         )
 
-        # ข้อมูลเพลงแบบสวยงาม
-        song_info = f"**{title}**\n"
-        song_info += f"👨‍🎤 **Artist:** {uploader}\n"
-        song_info += f"⏱️ **Duration:** {self.format_duration(duration)}\n"
-        song_info += f"👁️ **Views:** {self.format_number(view_count)}\n"
-        song_info += f"🎧 **Requested by:** {requester.mention}\n"
+        song_block = (
+            f"```ansi\n"
+            f"\u001b[1;37m{title}\u001b[0m\n"
+            f"```\n"
+            f"> 👨‍🎤  **ศิลปิน** ─ {uploader}\n"
+            f"> ⏱️  **ความยาว** ─ {format_duration(duration)}\n"
+            f"> 👁️  **ยอดวิว** ─ {format_number(view_count)}\n"
+            f"> 🎧  **สั่งโดย** ─ {requester.mention}\n"
+        )
+        embed.description = song_block
 
-        embed.add_field(name="🎶 Now Playing", value=song_info, inline=False)
+        if thumbnail:
+            embed.set_thumbnail(url=thumbnail)
 
-        # Progress bar พร้อมเวลา
         if player.start_time and duration:
             current_time = time.time() - player.start_time
-            progress_bar = self.get_progress_bar(current_time, duration)
-            time_display = f"{self.format_duration(current_time)} / {self.format_duration(duration)}"
+            progress_bar = get_progress_bar(current_time, duration, length=25)
+            time_display = f"`{format_duration(current_time)}` ▸ {progress_bar} ▸ `{format_duration(duration)}`"
         else:
-            progress_bar = "━" * 20
-            time_display = "00:00 / 00:00"
+            progress_bar = "━" * 25
+            time_display = f"`00:00` ▸ {progress_bar} ▸ `{format_duration(duration)}`"
 
         embed.add_field(
-            name="📊 Progress",
-            value=f"```{progress_bar}```\n{time_display}",
+            name="━━━━━━━━ ♪ แถบเวลา ♪ ━━━━━━━━",
+            value=time_display,
             inline=False,
         )
 
-        # ข้อมูลคิว
-        queue_info = f"📝 **Queue:** {len(player.queue)} songs\n"
-        queue_info += f"🔊 **Volume:** {int(player.volume * 100)}%\n"
-        queue_info += f"🔂 **Loop:** {'✅' if player.loop else '❌'}\n"
-        queue_info += f"🔀 **Shuffle:** {'✅' if player.shuffle else '❌'}\n"
-        queue_info += f"📍 **Channel:** {player.channel.mention}"
+        loop_icon = "```ansi\n\u001b[1;32m✓ เปิด\u001b[0m\n```" if player.loop else "```ansi\n\u001b[1;31m✗ ปิด\u001b[0m\n```"
+        shuffle_icon = "```ansi\n\u001b[1;32m✓ เปิด\u001b[0m\n```" if player.shuffle else "```ansi\n\u001b[1;31m✗ ปิด\u001b[0m\n```"
 
-        embed.add_field(name="⚙️ Player Status", value=queue_info, inline=True)
-
-        # แสดงเพลงถัดไป
-        if player.queue:
-            next_track = player.queue[0]
-            next_title = (
-                next_track[1][:50] + "..." if len(next_track[1]) > 50 else next_track[1]
-            )
-            embed.add_field(
-                name="⏭️ Up Next",
-                value=f"**{next_title}**\nby {next_track[4]}",
-                inline=True,
-            )
-        else:
-            embed.add_field(name="⏭️ Up Next", value="*Queue is empty*", inline=True)
-
-        # Footer สวยๆ
-        embed.set_footer(
-            text="🎵 พัฒนาโดย SUPERTONG | พิมพ์ชื่อเพลงหรือ URL เพื่อเพิ่มลงคิว",
-            icon_url="https://cdn.discordapp.com/emojis/741605543046807626.gif",
+        status_info = (
+            f"📝  **คิวเพลง** ─ `{len(player.queue)}` เพลง\n"
+            f"🔊  **ระดับเสียง** ─ `{int(player.volume * 100)}%`\n"
+            f"🔂  **วนซ้ำ** ─ {'`เปิด ✅`' if player.loop else '`ปิด ❌`'}\n"
+            f"🔀  **สุ่มเพลง** ─ {'`เปิด ✅`' if player.shuffle else '`ปิด ❌`'}\n"
         )
+        embed.add_field(name="⚙️ สถานะเครื่องเล่น", value=status_info, inline=True)
 
+        if player.queue:
+            next_tracks = []
+            for i, track in enumerate(list(player.queue)[:3]):
+                t = track[1][:40] + "..." if len(track[1]) > 40 else track[1]
+                next_tracks.append(f"`{i+1}.` {t}")
+            next_value = "\n".join(next_tracks)
+            if len(player.queue) > 3:
+                next_value += f"\n*...และอีก {len(player.queue) - 3} เพลง*"
+        else:
+            next_value = "*ว่างเปล่า ─ พิมพ์ชื่อเพลงเพื่อเพิ่ม*"
+
+        embed.add_field(name="⏭️ เพลงถัดไป", value=next_value, inline=True)
+
+        embed.set_footer(
+            text=f"📍 {player.channel.name} ─ พิมพ์ชื่อเพลงหรือ URL เพื่อเพิ่มลงคิว",
+            icon_url=requester.display_avatar.url,
+        )
         embed.timestamp = discord.utils.utcnow()
 
-        # สร้าง control buttons ที่สวยงาม
         view = EnhancedControlButtons(self, player)
+
+        if not player.message:
+            try:
+                async for msg in player.channel.history(limit=50):
+                    if msg.author == self.bot.user and msg.embeds and any("Progress" in f.name for f in msg.embeds[0].fields):
+                        player.message = msg
+                        break
+            except Exception as e:
+                logger.warning(f"⚠️ Could not search old embed: {e}")
 
         if player.message:
             try:
@@ -217,7 +196,6 @@ class Music(commands.Cog):
 
     @app_commands.command(name="create_music_room", description="สร้างห้องเพลง")
     async def create_music_room(self, interaction: discord.Interaction):
-        # ตอบกลับทันทีเพื่อไม่ให้ timeout
         response_embed = discord.Embed(
             title="🎵 Creating Music Room...",
             description="Please wait while I create your personal music room! ⏳",
@@ -228,7 +206,6 @@ class Music(commands.Cog):
         try:
             name = f"🎵┃{interaction.user.display_name}-music"
 
-            # สร้าง category สำหรับห้องเพลง
             category = discord.utils.get(
                 interaction.guild.categories, name="🎵 MUSIC ROOMS"
             )
@@ -242,58 +219,60 @@ class Music(commands.Cog):
             )
             self.music_channels[channel.id] = channel
 
-            # สร้าง embed แนะนำที่สวยงาม
             welcome_embed = discord.Embed(
-                title="🎵 Damkoeng Music Room",
-                description="**Welcome to your personal music paradise! ✨**",
-                color=0x9932CC,
+                description=(
+                    "## ♫ ─── ยินดีต้อนรับสู่ห้องเพลง ─── ♫\n"
+                    f"> สร้างโดย {interaction.user.mention}\n\n"
+                    "```ansi\n"
+                    "\u001b[1;35m♪ พิมพ์ชื่อเพลง หรือวาง URL เพื่อเริ่มเล่นเพลง ♪\u001b[0m\n"
+                    "```\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                ),
+                color=0x7C3AED,
             )
 
             welcome_embed.set_image(url="attachment://Damkoeng.jpg")
 
             welcome_embed.add_field(
-                name="Start",
-                value=("```\n" "• Type name song or url to play music ˚ ⊹\n" "```"),
-                inline=False,
-            )
-
-            welcome_embed.add_field(
-                name="🎛️ Control Panel",
+                name="🎛️ แผงควบคุมหลัก",
                 value=(
-                    "⏹️ **Stop** - Stop music and disconnect\n"
-                    "⏸️ **Pause** - Pause current song\n"
-                    "▶️ **Resume** - Resume playback\n"
-                    "⏭️ **Skip** - Skip to next song\n"
+                    "> ⏹️  **หยุด** ─ หยุดเพลงและออกจากห้อง\n"
+                    "> ⏸️  **พัก** ─ พักเพลงชั่วคราว\n"
+                    "> ▶️  **เล่นต่อ** ─ เล่นเพลงต่อจากที่พัก\n"
+                    "> ⏭️  **ข้าม** ─ ข้ามไปเพลงถัดไป\n"
                 ),
                 inline=True,
             )
 
             welcome_embed.add_field(
-                name="🔧 Advanced Controls",
+                name="🔧 ตั้งค่าขั้นสูง",
                 value=(
-                    "🔁 **Previous** - Play previous song\n"
-                    "🔀 **Shuffle** - Toggle shuffle mode\n"
-                    "🔂 **Loop** - Toggle loop mode\n"
-                    "🔊 **Volume** - Adjust volume\n"
+                    "> 🔁  **ย้อนกลับ** ─ เล่นเพลงก่อนหน้า\n"
+                    "> 🔀  **สุ่ม** ─ สลับลำดับเพลงแบบสุ่ม\n"
+                    "> 🔂  **วนซ้ำ** ─ เปิด/ปิดการเล่นซ้ำ\n"
+                    "> 🔊  **เสียง** ─ ปรับระดับเสียง\n"
                 ),
                 inline=True,
             )
 
             welcome_embed.add_field(
-                name="💡 Pro Tips",
+                name="━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
                 value=(
-                    "• Join a voice channel first\n"
-                    "• Support YouTube, Spotify links\n"
-                    "• Queue unlimited songs\n"
+                    "💡 **คำแนะนำ**\n"
+                    "```\n"
+                    "• เข้าห้องเสียง (Voice Channel) ก่อนสั่งเพลง\n"
+                    "• รองรับทั้ง YouTube URL และชื่อเพลง\n"
+                    "• เพิ่มเพลงลงคิวได้ไม่จำกัด\n"
+                    "• กดปุ่มด้านล่าง Embed เพื่อควบคุม\n"
+                    "```"
                 ),
                 inline=False,
             )
 
             welcome_embed.set_footer(
-                text="🎵 พัฒนาโดย SUPERTONG | ขอให้สนุกกับการฟังเพลง!",
+                text="🎵 Damkoeng Music Bot · พัฒนาโดย SUPERTONG",
                 icon_url=interaction.user.display_avatar.url,
             )
-
             welcome_embed.timestamp = discord.utils.utcnow()
 
             try:
@@ -302,26 +281,28 @@ class Music(commands.Cog):
             except:
                 await channel.send(embed=welcome_embed)
 
-            # อัพเดท response message
             success_embed = discord.Embed(
-                title="✅ Music Room Created!",
-                description=f"🎵 Your music room {channel.mention} is ready!\n🎧 Join a voice channel and start typing song names!",
-                color=0x00FF00,
+                title="✅ สร้างห้องเพลงสำเร็จ!",
+                description=(
+                    f"🎵 ห้องเพลงของคุณ {channel.mention} พร้อมใช้งานแล้ว!\n"
+                    f"🎧 เข้าห้องเสียงแล้วพิมพ์ชื่อเพลงเลยครับ!"
+                ),
+                color=0x22C55E,
             )
 
             try:
                 await interaction.edit_original_response(embed=success_embed)
             except:
-                pass  # ถ้าแก้ไขไม่ได้ก็ไม่เป็นไร
+                pass
 
-            logger.info(f"Created enhanced music room: {channel.name}")
+            logger.info(f"🏠 Created music room: {channel.name}")
 
         except Exception as e:
-            logger.error(f"Error creating music room: {e}")
+            logger.error(f"❌ Error creating music room: {e}")
             error_embed = discord.Embed(
-                title="❌ Error Creating Room",
-                description="Something went wrong while creating your music room. Please try again.",
-                color=0xFF0000,
+                title="❌ เกิดข้อผิดพลาด",
+                description="ไม่สามารถสร้างห้องเพลงได้ กรุณาลองใหม่อีกครั้ง",
+                color=0xEF4444,
             )
             try:
                 await interaction.edit_original_response(embed=error_embed)
@@ -350,9 +331,9 @@ class Music(commands.Cog):
         voice_state = message.author.voice
         if not voice_state or not voice_state.channel:
             error_embed = discord.Embed(
-                title="❌ Error",
-                description="Please join a voice channel first!",
-                color=0xFF0000,
+                title="❌ ต้องเข้าห้องเสียงก่อน",
+                description="กรุณาเข้าห้องเสียง (Voice Channel) ก่อนสั่งเพลงนะครับ!",
+                color=0xEF4444,
             )
             error_msg = await message.channel.send(embed=error_embed)
             await asyncio.sleep(3)
@@ -367,11 +348,10 @@ class Music(commands.Cog):
             player.voice_client = vc
             player.channel = message.channel
 
-        # แสดง loading message
         loading_embed = discord.Embed(
-            title="🔍 Searching...",
-            description=f"Looking for: **{message.content}**",
-            color=0xFFFF00,
+            title="🔍 กำลังค้นหา...",
+            description=f"กำลังค้นหาเพลง: **{message.content}**",
+            color=0x7C3AED,
         )
         loading_msg = await message.channel.send(embed=loading_embed)
 
@@ -383,18 +363,17 @@ class Music(commands.Cog):
                 (source, title, duration, thumb, uploader, view_count, message.author)
             )
 
-            # แสดง added to queue message
             added_embed = discord.Embed(
-                title="✅ Added to Queue",
-                description=f"**{title}**\nby {uploader}",
-                color=0x00FF00,
+                title="✅ เพิ่มเข้าคิวแล้ว",
+                description=f"**{title}**\nโดย {uploader}",
+                color=0x22C55E,
             )
             added_embed.set_thumbnail(url=thumb)
             added_embed.add_field(
-                name="Position in Queue", value=f"#{len(player.queue)}", inline=True
+                name="ลำดับในคิว", value=f"`#{len(player.queue)}`", inline=True
             )
             added_embed.add_field(
-                name="Duration", value=self.format_duration(duration), inline=True
+                name="ความยาว", value=f"`{format_duration(duration)}`", inline=True
             )
 
             try:
@@ -405,11 +384,11 @@ class Music(commands.Cog):
                 pass
 
         except Exception as e:
-            logger.warning(f"Error loading audio: {e}")
+            logger.warning(f"⚠️ Error loading audio: {e}")
             error_embed = discord.Embed(
-                title="❌ Error",
-                description="Could not load the song. Please try again with a different query.",
-                color=0xFF0000,
+                title="❌ ไม่สามารถโหลดเพลงได้",
+                description="ไม่พบเพลงที่ต้องการ กรุณาลองค้นหาด้วยคำอื่น หรือวาง URL โดยตรง",
+                color=0xEF4444,
             )
             try:
                 await loading_msg.edit(embed=error_embed)
@@ -431,160 +410,9 @@ class Music(commands.Cog):
                     try:
                         await channel.delete()
                         del self.music_channels[channel_id]
-                        logger.info(f"Deleted inactive music room: {channel.name}")
+                        logger.info(f"🧹 Deleted inactive music room: {channel.name}")
                     except Exception as e:
-                        logger.warning(f"Error deleting channel: {e}")
-
-
-class EnhancedControlButtons(View):
-    def __init__(self, cog, player):
-        super().__init__(timeout=None)
-        self.cog = cog
-        self.player = player
-
-    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, label="Stop")
-    async def stop(self, interaction: discord.Interaction, button: Button):
-        await self.player.voice_client.disconnect()
-        if self.player.message:
-            try:
-                await self.player.message.delete()
-            except:
-                pass
-
-        embed = discord.Embed(
-            title="⏹️ Music Stopped",
-            description="Disconnected from voice channel",
-            color=0xFF0000,
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @discord.ui.button(emoji="⏸️", style=discord.ButtonStyle.primary, label="Pause")
-    async def pause(self, interaction: discord.Interaction, button: Button):
-        if self.player.voice_client.is_playing():
-            self.player.voice_client.pause()
-            embed = discord.Embed(
-                title="⏸️ Music Paused",
-                description="Playback has been paused",
-                color=0xFFA500,
-            )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @discord.ui.button(emoji="▶️", style=discord.ButtonStyle.success, label="Resume")
-    async def resume(self, interaction: discord.Interaction, button: Button):
-        if self.player.voice_client.is_paused():
-            self.player.voice_client.resume()
-            embed = discord.Embed(
-                title="▶️ Music Resumed",
-                description="Playback has been resumed",
-                color=0x00FF00,
-            )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, label="Skip")
-    async def skip(self, interaction: discord.Interaction, button: Button):
-        if self.player.current:
-            current_title = self.player.current[1]
-            self.player.voice_client.stop()
-            embed = discord.Embed(
-                title="⏭️ Song Skipped",
-                description=(
-                    f"Skipped: **{current_title[:50]}...**"
-                    if len(current_title) > 50
-                    else f"Skipped: **{current_title}**"
-                ),
-                color=0x00BFFF,
-            )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @discord.ui.button(
-        emoji="🔁", style=discord.ButtonStyle.secondary, label="Previous"
-    )
-    async def previous(self, interaction: discord.Interaction, button: Button):
-        if self.player.history:
-            self.player.queue.appendleft(self.player.current)
-            self.player.current = self.player.history.popleft()
-            self.player.voice_client.stop()
-            embed = discord.Embed(
-                title="🔁 Previous Song",
-                description="Playing previous song",
-                color=0x9370DB,
-            )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @discord.ui.button(emoji="🔀", style=discord.ButtonStyle.secondary, label="Shuffle")
-    async def toggle_shuffle(self, interaction: discord.Interaction, button: Button):
-        self.player.shuffle = not self.player.shuffle
-        state = "Enabled" if self.player.shuffle else "Disabled"
-        color = 0x00FF00 if self.player.shuffle else 0xFF0000
-        embed = discord.Embed(
-            title=f"🔀 Shuffle {state}",
-            description=f"Shuffle mode is now {state.lower()}",
-            color=color,
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @discord.ui.button(emoji="🔂", style=discord.ButtonStyle.secondary, label="Loop")
-    async def toggle_loop(self, interaction: discord.Interaction, button: Button):
-        self.player.loop = not self.player.loop
-        state = "Enabled" if self.player.loop else "Disabled"
-        color = 0x00FF00 if self.player.loop else 0xFF0000
-        embed = discord.Embed(
-            title=f"🔂 Loop {state}",
-            description=f"Loop mode is now {state.lower()}",
-            color=color,
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @discord.ui.button(emoji="🔊", style=discord.ButtonStyle.secondary, label="Volume")
-    async def volume_control(self, interaction: discord.Interaction, button: Button):
-        view = VolumeControlView(self.cog, self.player)
-        embed = discord.Embed(
-            title="🔊 Volume Control",
-            description=f"Current volume: **{int(self.player.volume * 100)}%**\nUse the buttons below to adjust",
-            color=0x1DB954,
-        )
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-
-
-class VolumeControlView(View):
-    def __init__(self, cog, player):
-        super().__init__(timeout=30)
-        self.cog = cog
-        self.player = player
-
-    @discord.ui.button(emoji="🔇", label="Mute", style=discord.ButtonStyle.danger)
-    async def mute(self, interaction: discord.Interaction, button: Button):
-        self.player.volume = 0.0
-        embed = discord.Embed(title="🔇 Muted", color=0xFF0000)
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    @discord.ui.button(emoji="🔉", label="-10%", style=discord.ButtonStyle.secondary)
-    async def volume_down(self, interaction: discord.Interaction, button: Button):
-        self.player.volume = max(0.0, self.player.volume - 0.1)
-        embed = discord.Embed(
-            title="🔊 Volume Control",
-            description=f"Volume: **{int(self.player.volume * 100)}%**",
-            color=0x1DB954,
-        )
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    @discord.ui.button(emoji="🔊", label="+10%", style=discord.ButtonStyle.secondary)
-    async def volume_up(self, interaction: discord.Interaction, button: Button):
-        self.player.volume = min(2.0, self.player.volume + 0.1)
-        embed = discord.Embed(
-            title="🔊 Volume Control",
-            description=f"Volume: **{int(self.player.volume * 100)}%**",
-            color=0x1DB954,
-        )
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    @discord.ui.button(emoji="📢", label="Max", style=discord.ButtonStyle.success)
-    async def max_volume(self, interaction: discord.Interaction, button: Button):
-        self.player.volume = 1.0
-        embed = discord.Embed(
-            title="📢 Max Volume", description="Volume: **100%**", color=0x00FF00
-        )
-        await interaction.response.edit_message(embed=embed, view=self)
+                        logger.warning(f"⚠️ Error deleting channel: {e}")
 
 
 async def setup(bot):
